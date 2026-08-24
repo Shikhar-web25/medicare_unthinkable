@@ -12,16 +12,25 @@ function getOpenRouter(): OpenRouter {
   return openRouterClient;
 }
 
-export const OPENROUTER_MODELS = [
+// OpenRouter accepts a maximum of 3 models per request in the native `models` fallback array.
+export const PRIMARY_MODELS = [
   'dots-studio/dots-3-note-preview:free',
   'nvidia/nemotron-3.5-lightning:free',
-  'poolside/laguna-s-2.1:free',
+  'poolside/laguna-s-2.1:free'
+];
+
+export const SECONDARY_MODELS = [
   'nvidia/nemotron-3-ultra-550b-a55b:free',
   'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'
 ];
 
-function isNonRetryableStatus(status?: number): boolean {
-  return status === 400 || status === 401 || status === 403 || status === 429;
+export const MODEL_TIERS = [
+  PRIMARY_MODELS,
+  SECONDARY_MODELS
+];
+
+function isFatalClientError(status?: number): boolean {
+  return status === 400 || status === 401 || status === 403;
 }
 
 function extractTextContent(content: any): string {
@@ -115,16 +124,17 @@ export async function generatePreVisitSummary(symptoms: string): Promise<{
   const openrouter = getOpenRouter();
   const prompt = `Analyse these symptoms and return: urgency level (Low / Medium / High), chief complaint, and three suggested questions for the doctor. Symptoms: ${symptoms}`;
 
-  const maxRetries = 1;
-  let attempt = 0;
   let lastError: any = null;
 
-  while (attempt <= maxRetries) {
+  for (let tierIdx = 0; tierIdx < MODEL_TIERS.length; tierIdx++) {
+    const tierModels = MODEL_TIERS[tierIdx];
+    const tierName = tierIdx === 0 ? 'Primary' : 'Secondary';
+
     try {
       const response = await openrouter.chat.send({
         chatRequest: {
-          model: OPENROUTER_MODELS[0],
-          models: OPENROUTER_MODELS,
+          model: tierModels[0],
+          models: tierModels,
           messages: [
             {
               role: 'user',
@@ -138,8 +148,8 @@ export async function generatePreVisitSummary(symptoms: string): Promise<{
         }
       });
 
-      const answeredModel = (response as any).model || 'unknown';
-      console.log(`[OpenRouter Pre-Visit] Success. Responded model: ${answeredModel}`);
+      const answeredModel = (response as any).model || tierModels[0];
+      console.log(`[OpenRouter Pre-Visit] Success (${tierName} tier). Responded model: ${answeredModel}`);
 
       const rawContent = (response as any).choices?.[0]?.message?.content;
       const text = extractTextContent(rawContent);
@@ -152,14 +162,15 @@ export async function generatePreVisitSummary(symptoms: string): Promise<{
     } catch (e: any) {
       lastError = e;
       const status = e.statusCode || e.status || (e.response ? e.response.status : undefined);
-      console.error(`[OpenRouter Pre-Visit] Attempt ${attempt + 1} failed: ${e.message || e} (Status: ${status || 'N/A'})`);
+      console.error(`[OpenRouter Pre-Visit] ${tierName} tier failed: ${e.message || e} (Status: ${status || 'N/A'})`);
 
-      if (isNonRetryableStatus(status) || attempt >= maxRetries) {
-        throw new Error(`OpenRouter pre-visit generation failed: ${e.message || e}`);
+      if (isFatalClientError(status)) {
+        throw new Error(`OpenRouter pre-visit generation failed (${status}): ${e.message || e}`);
       }
 
-      attempt++;
-      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      if (tierIdx < MODEL_TIERS.length - 1) {
+        console.log('[OpenRouter Pre-Visit] Falling back to secondary model tier...');
+      }
     }
   }
 
@@ -181,16 +192,17 @@ export async function generatePostVisitSummary(
   }
   const prompt = `Convert these clinical notes into a patient-friendly summary with medication schedule and follow-up steps: ${context}`;
 
-  const maxRetries = 1;
-  let attempt = 0;
   let lastError: any = null;
 
-  while (attempt <= maxRetries) {
+  for (let tierIdx = 0; tierIdx < MODEL_TIERS.length; tierIdx++) {
+    const tierModels = MODEL_TIERS[tierIdx];
+    const tierName = tierIdx === 0 ? 'Primary' : 'Secondary';
+
     try {
       const response = await openrouter.chat.send({
         chatRequest: {
-          model: OPENROUTER_MODELS[0],
-          models: OPENROUTER_MODELS,
+          model: tierModels[0],
+          models: tierModels,
           messages: [
             {
               role: 'user',
@@ -201,8 +213,8 @@ export async function generatePostVisitSummary(
         }
       });
 
-      const answeredModel = (response as any).model || 'unknown';
-      console.log(`[OpenRouter Post-Visit] Success. Responded model: ${answeredModel}`);
+      const answeredModel = (response as any).model || tierModels[0];
+      console.log(`[OpenRouter Post-Visit] Success (${tierName} tier). Responded model: ${answeredModel}`);
 
       const rawContent = (response as any).choices?.[0]?.message?.content;
       const text = extractTextContent(rawContent);
@@ -215,14 +227,15 @@ export async function generatePostVisitSummary(
     } catch (e: any) {
       lastError = e;
       const status = e.statusCode || e.status || (e.response ? e.response.status : undefined);
-      console.error(`[OpenRouter Post-Visit] Attempt ${attempt + 1} failed: ${e.message || e} (Status: ${status || 'N/A'})`);
+      console.error(`[OpenRouter Post-Visit] ${tierName} tier failed: ${e.message || e} (Status: ${status || 'N/A'})`);
 
-      if (isNonRetryableStatus(status) || attempt >= maxRetries) {
-        throw new Error(`OpenRouter post-visit generation failed: ${e.message || e}`);
+      if (isFatalClientError(status)) {
+        throw new Error(`OpenRouter post-visit generation failed (${status}): ${e.message || e}`);
       }
 
-      attempt++;
-      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      if (tierIdx < MODEL_TIERS.length - 1) {
+        console.log('[OpenRouter Post-Visit] Falling back to secondary model tier...');
+      }
     }
   }
 
