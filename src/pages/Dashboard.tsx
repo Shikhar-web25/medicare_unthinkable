@@ -22,23 +22,51 @@ import {
 } from 'lucide-react';
 
 // ─── CRITICAL: Safe date helpers ──────────────────────────────────────────────
-// The list endpoint returns snake_case `slot_start` from raw SQL (a.*)
-// The detail endpoint returns camelCase `slotStart` from Drizzle ORM
-// fmtDate/fmtTime handle BOTH field names and guard against Invalid Date.
+// The list endpoint (raw SQL) returns slot_start as "2026-08-25 10:00:00"
+// (space-separated, no T, no Z). new Date() treats that as *local* time in
+// Chrome and produces Invalid Date in Safari. We normalise by replacing the
+// space with T and appending Z so the string is always UTC ISO 8601.
+// The detail endpoint (Drizzle ORM) may return camelCase slotStart.
+// Both are handled via getSlotStart() + normaliseDate().
 function getSlotStart(apt: any): string | undefined {
   return apt?.slot_start ?? apt?.slotStart;
 }
 
+/** Convert any date value from the API into a reliable Date object (UTC). */
+function normaliseDate(v: any): Date | null {
+  if (!v) return null;
+  // If it's already a Date object, return as-is
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+  let s = String(v).trim();
+  // Postgres returns "2026-08-25 10:00:00" or "2026-08-25 10:00:00.000"
+  // Convert to ISO 8601 UTC: "2026-08-25T10:00:00Z"
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s)) {
+    s = s.replace(' ', 'T').replace(/(\.\d+)?$/, '') + 'Z';
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function fmtDate(v: any): string {
-  if (!v) return '—';
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const d = normaliseDate(v);
+  return d ? d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 }
 
 function fmtTime(v: any): string {
+  const d = normaliseDate(v);
+  return d ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '—';
+}
+
+/** Format a date-only field like startDate / endDate (e.g. "2026-08-25"). */
+function fmtDateOnly(v: any): string {
   if (!v) return '—';
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  // Date-only strings should not be treated as UTC midnight (would shift on local TZ);
+  // interpret them as local calendar dates instead.
+  const s = String(v).trim().substring(0, 10); // "YYYY-MM-DD"
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return fmtDate(v);
+  const [year, month, day] = s.split('-').map(Number);
+  const d = new Date(year, month - 1, day);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 function getGreeting(): string {
@@ -269,16 +297,25 @@ function AppointmentModal({
                         <span className="text-xs font-bold text-blue-800 uppercase tracking-wider">Scheduled Medication Reminders ({apt.medicationReminders.length})</span>
                       </div>
                       <div className="space-y-1.5">
-                        {apt.medicationReminders.map((mr: any) => (
-                          <div key={mr.id} className="text-xs text-slate-700 flex items-center justify-between bg-white px-3 py-2 rounded border border-blue-100">
-                            <div>
-                              <span className="font-semibold text-slate-800">{mr.medicationName}</span>
-                              {mr.dosage ? <span className="text-slate-500"> ({mr.dosage})</span> : ''} · <span className="text-blue-700 font-medium">{mr.frequency}</span>
-                              {mr.instructions ? <span className="text-slate-500 italic"> — "{mr.instructions}"</span> : ''}
+                        {apt.medicationReminders.map((mr: any) => {
+                          let dispName = mr.medicationName || '';
+                          if (mr.dosage) {
+                            const esc = mr.dosage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            dispName = dispName.replace(new RegExp(`\\s*${esc}\\s*$`, 'i'), '').trim() || mr.medicationName;
+                          }
+                          return (
+                            <div key={mr.id} className="text-xs text-slate-700 flex items-center justify-between bg-white px-3 py-2 rounded border border-blue-100">
+                              <div className="flex flex-wrap items-center gap-x-1 min-w-0">
+                                <span className="font-semibold text-slate-800">{dispName}</span>
+                                {mr.dosage && <><span className="text-slate-300">·</span><span className="text-slate-600">{mr.dosage}</span></>}
+                                <span className="text-slate-300">·</span>
+                                <span className="text-blue-700 font-medium">{mr.frequency}</span>
+                                {mr.instructions && <span className="text-slate-500 italic truncate"> – {mr.instructions}</span>}
+                              </div>
+                              <span className="text-[10px] font-semibold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 shrink-0 ml-2">{mr.status}</span>
                             </div>
-                            <span className="text-[10px] font-semibold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">{mr.status}</span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -349,18 +386,27 @@ function AppointmentModal({
                         <span className="text-xs font-bold text-blue-800 uppercase tracking-wider">Your Medication Reminders</span>
                       </div>
                       <div className="space-y-2">
-                        {apt.medicationReminders.map((mr: any) => (
-                          <div key={mr.id} className="bg-white p-3 rounded-lg border border-blue-100 flex items-start justify-between">
-                            <div className="space-y-0.5">
-                              <div className="text-sm font-semibold text-slate-800">
-                                {mr.medicationName} {mr.dosage ? <span className="text-xs font-normal text-slate-500">({mr.dosage})</span> : ''}
+                        {apt.medicationReminders.map((mr: any) => {
+                          let dispName = mr.medicationName || '';
+                          if (mr.dosage) {
+                            const esc = mr.dosage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            dispName = dispName.replace(new RegExp(`\\s*${esc}\\s*$`, 'i'), '').trim() || mr.medicationName;
+                          }
+                          return (
+                            <div key={mr.id} className="bg-white p-3 rounded-lg border border-blue-100 flex items-start justify-between">
+                              <div className="space-y-0.5">
+                                <div className="text-sm font-semibold text-slate-800">{dispName}</div>
+                                <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-1">
+                                  {mr.dosage && <span className="font-medium text-slate-700">{mr.dosage}</span>}
+                                  {mr.dosage && <span className="text-slate-300">·</span>}
+                                  <span className="font-semibold text-blue-700">{mr.frequency}</span>
+                                </div>
+                                {mr.instructions && <div className="text-xs text-slate-500 italic">{mr.instructions}</div>}
                               </div>
-                              <div className="text-xs text-blue-700 font-medium">{mr.frequency} {mr.reminderTime ? `(${mr.reminderTime})` : ''}</div>
-                              {mr.instructions && <div className="text-xs text-slate-500 italic">"{mr.instructions}"</div>}
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 uppercase shrink-0 ml-2">{mr.status}</span>
                             </div>
-                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 uppercase">{mr.status}</span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -1002,44 +1048,57 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <div className="space-y-2">
-                  {medicationReminders.map(rem => (
-                    <div key={rem.id} className="flex items-start justify-between bg-slate-50 border border-slate-100 rounded-lg p-3">
-                      <div className="space-y-0.5 min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-slate-800">{rem.medicationName}</span>
-                          {rem.dosage && (
-                            <span className="text-[11px] font-medium text-slate-500 bg-white px-1.5 py-0.5 border border-slate-200 rounded">
-                              {rem.dosage}
-                            </span>
+                  {medicationReminders.map(rem => {
+                    // Calculate duration in days from startDate/endDate for display
+                    const startD = normaliseDate(rem.startDate);
+                    const endD = normaliseDate(rem.endDate);
+                    const durationDays = (startD && endD)
+                      ? Math.round((endD.getTime() - startD.getTime()) / 86400000)
+                      : null;
+                    // Clean medication name: strip dosage suffix if parser appended it
+                    let displayName = rem.medicationName || '';
+                    if (rem.dosage) {
+                      const doseEscaped = rem.dosage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                      displayName = displayName.replace(new RegExp(`\\s*${doseEscaped}\\s*$`, 'i'), '').trim();
+                    }
+                    if (!displayName) displayName = rem.medicationName;
+                    return (
+                      <div key={rem.id} className="flex items-start justify-between bg-slate-50 border border-slate-100 rounded-lg p-3">
+                        <div className="space-y-0.5 min-w-0 flex-1">
+                          {/* Pill: Name · Dosage · Frequency · Duration */}
+                          <div className="text-sm font-semibold text-slate-800">
+                            {displayName}
+                          </div>
+                          <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-1.5">
+                            {rem.dosage && <span className="font-medium text-slate-700">{rem.dosage}</span>}
+                            {rem.dosage && <span className="text-slate-300">·</span>}
+                            <span className="font-semibold text-blue-700">{rem.frequency}</span>
+                            {durationDays && durationDays > 0 && (
+                              <><span className="text-slate-300">·</span><span className="text-slate-500">{durationDays} day{durationDays !== 1 ? 's' : ''}</span></>
+                            )}
+                          </div>
+                          {rem.instructions && (
+                            <div className="text-xs text-slate-500 italic">{rem.instructions}</div>
                           )}
+                          <div className="text-[11px] text-slate-400">
+                            {fmtDateOnly(rem.startDate)} – {fmtDateOnly(rem.endDate)}
+                            {rem.doctorName && <span> · Dr. {rem.doctorName}</span>}
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-600">
-                          <span className="font-semibold text-blue-700">{rem.frequency}</span>
-                          {rem.reminderTime && rem.reminderTime !== 'As needed' && (
-                            <span className="text-slate-400 ml-1.5">({rem.reminderTime})</span>
-                          )}
-                        </div>
-                        {rem.instructions && (
-                          <div className="text-xs text-slate-500 italic">"{rem.instructions}"</div>
-                        )}
-                        <div className="text-[11px] text-slate-400">
-                          {fmtDate(rem.startDate)} – {fmtDate(rem.endDate)}
-                          {rem.doctorName && <span> · Dr. {rem.doctorName}</span>}
+                        <div className="shrink-0 ml-3">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
+                            rem.status === 'ACTIVE'
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : rem.status === 'COMPLETED'
+                              ? 'bg-slate-100 text-slate-500 border border-slate-200'
+                              : 'bg-rose-50 text-rose-700 border border-rose-200'
+                          }`}>
+                            {rem.status}
+                          </span>
                         </div>
                       </div>
-                      <div className="shrink-0 ml-3">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
-                          rem.status === 'ACTIVE'
-                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : rem.status === 'COMPLETED'
-                            ? 'bg-slate-100 text-slate-500 border border-slate-200'
-                            : 'bg-rose-50 text-rose-700 border border-rose-200'
-                        }`}>
-                          {rem.status}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             )}

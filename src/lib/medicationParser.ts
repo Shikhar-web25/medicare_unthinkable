@@ -194,13 +194,11 @@ export function parsePrescription(rawPrescription?: string | null): ParsedMedica
       const frequency = freqMatch ? freqMatch.frequency : 'As prescribed';
       const reminderTimes = freqMatch ? freqMatch.times : [];
 
-      // Combine medication name with dosage if clean name is simple
-      const fullMedicationName = dosage && !name.toLowerCase().includes(dosage.toLowerCase())
-        ? `${name} ${dosage}`.trim()
-        : name;
-
+      // Store only the clean drug name (not combined with dosage).
+      // The dosage field is already stored separately; combining them
+      // caused redundant display like "Paracetamol 650mg (650mg)".
       results.push({
-        medicationName: fullMedicationName,
+        medicationName: name,
         dosage: dosage || undefined,
         frequency,
         instructions: instructions || undefined,
