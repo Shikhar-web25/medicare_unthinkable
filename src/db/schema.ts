@@ -84,11 +84,19 @@ export const medicationReminders = pgTable('medication_reminders', {
 
 export const notificationLogs = pgTable('notification_logs', {
   id: serial('id').primaryKey(),
-  userId: integer('user_id').references(() => users.id).notNull(),
-  type: varchar('type', { length: 50 }).notNull(),
-  status: varchar('status', { length: 20 }).notNull(), // 'sent', 'failed', 'pending'
+  appointmentId: integer('appointment_id').references(() => appointments.id),
+  recipientUserId: integer('recipient_user_id').references(() => users.id),
+  userId: integer('user_id').references(() => users.id),
+  recipientEmail: text('recipient_email').notNull(),
+  type: varchar('type', { length: 50 }).notNull(), // 'BOOKING_CONFIRMATION', 'APPOINTMENT_REMINDER', 'CANCELLATION', 'RESCHEDULE', 'LEAVE_CONFLICT'
+  channel: varchar('channel', { length: 20 }).default('email').notNull(),
+  status: varchar('status', { length: 20 }).default('PENDING').notNull(), // 'PENDING', 'SENDING', 'SENT', 'FAILED'
   retryCount: integer('retry_count').default(0).notNull(),
+  lastError: text('last_error'),
   errorMessage: text('error_message'),
+  scheduledFor: timestamp('scheduled_for').defaultNow().notNull(),
+  sentAt: timestamp('sent_at'),
+  payload: text('payload'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

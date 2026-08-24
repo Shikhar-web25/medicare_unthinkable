@@ -8,6 +8,13 @@ import { eq, and, or, sql, gte, lte } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { generatePreVisitSummary, generatePostVisitSummary } from './src/lib/gemini.js';
+import {
+  startNotificationCronJobs,
+  notifyBookingCreated,
+  notifyAppointmentCancelled,
+  notifyAppointmentRescheduled,
+  notifyLeaveConflictAppointments,
+} from './src/services/notificationService.js';
 
 async function startServer() {
   const app = express();
@@ -192,6 +199,25 @@ async function startServer() {
         });
       }
 
+      // Fetch affected appointments with patient and doctor details for notification
+      const conflictAppointments = await db.execute(sql`
+        SELECT 
+          a.id,
+          a.slot_start AS "slotStart",
+          p.id AS "patientId",
+          p.name AS "patientName",
+          p.email AS "patientEmail",
+          d.name AS "doctorName"
+        FROM appointments a
+        JOIN users p ON a.patient_id = p.id
+        JOIN doctor_profiles dp ON a.doctor_id = dp.id
+        JOIN users d ON dp.user_id = d.id
+        WHERE a.doctor_id = ${doctorId}
+          AND a.slot_start >= ${startOfDay}
+          AND a.slot_start <= ${endOfDay}
+          AND a.status = 'scheduled'
+      `);
+
       await db.transaction(async (tx) => {
         // Insert leave
         await tx.insert(schema.doctorLeaveDays).values({ doctorId, date, reason });
@@ -206,10 +232,23 @@ async function startServer() {
               lte(schema.appointments.slotStart, endOfDay),
               eq(schema.appointments.status, 'scheduled')
             ));
-          
-          // TODO: Trigger email notifications here in Stage 3
         }
       });
+
+      // Send leave conflict notification asynchronously after transaction commits
+      if (conflictAppointments.rows.length > 0) {
+        notifyLeaveConflictAppointments(
+          conflictAppointments.rows.map((row: any) => ({
+            id: row.id,
+            patientId: row.patientId,
+            patientName: row.patientName,
+            patientEmail: row.patientEmail,
+            doctorName: row.doctorName,
+            slotStart: row.slotStart,
+            reason: reason || undefined,
+          }))
+        ).catch(err => console.error('[Leave] Conflict notification error:', err));
+      }
 
       res.json({ success: true, affected: conflicts.length });
     } catch (e: any) {
@@ -540,6 +579,11 @@ async function startServer() {
         }
 
         res.json({ appointment });
+
+        // Trigger booking confirmation email asynchronously after response
+        notifyBookingCreated(appointment.id).catch(err => {
+          console.error('[Booking] Email notification error:', err);
+        });
       });
     } catch (e: any) {
       if (e.code === '23505' || e.message.includes('CONFLICT')) {
@@ -573,6 +617,11 @@ async function startServer() {
           .where(eq(schema.appointments.id, appointmentId));
         
         res.json({ success: true });
+
+        // Trigger cancellation email asynchronously after response
+        notifyAppointmentCancelled(appointmentId).catch(err => {
+          console.error('[Cancellation] Email notification error:', err);
+        });
       });
     } catch (e: any) {
       if (e.message.includes('NOT_FOUND')) return res.status(404).json({ error: e.message.replace('NOT_FOUND: ', '') });
@@ -634,6 +683,7 @@ async function startServer() {
           ));
         if (existingHold.length > 0) throw new Error('CONFLICT: Slot is currently held');
 
+        const oldSlotStart = appointment.slotStart;
         const slotEnd = new Date(slotDate.getTime() + doctor.slotDurationMinutes * 60000);
 
         await tx.update(schema.appointments)
@@ -641,6 +691,11 @@ async function startServer() {
           .where(eq(schema.appointments.id, appointmentId));
         
         res.json({ success: true, slotStart: slotDate });
+
+        // Trigger reschedule email asynchronously after response
+        notifyAppointmentRescheduled(appointmentId, oldSlotStart).catch(err => {
+          console.error('[Reschedule] Email notification error:', err);
+        });
       });
     } catch (e: any) {
       if (e.code === '23505' || e.message.includes('CONFLICT')) {
@@ -789,6 +844,8 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    // Start background notification cron jobs (5-min interval)
+    startNotificationCronJobs();
   });
 }
 
