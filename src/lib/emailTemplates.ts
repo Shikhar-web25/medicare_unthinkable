@@ -417,3 +417,67 @@ Time: ${dateStr} at ${timeStr}
 
   return { subject, text, html: baseHtml(subject, bodyHtml) };
 }
+
+// ─── 6. MEDICATION REMINDER ───────────────────────────────────────────────────
+
+export function patientMedicationReminderTemplate({
+  patientName,
+  medicationName,
+  dosage,
+  instructions,
+  frequency,
+  scheduledTime,
+  startDate,
+  endDate,
+}: {
+  patientName: string;
+  medicationName: string;
+  dosage?: string;
+  instructions?: string;
+  frequency: string;
+  scheduledTime: string;
+  startDate?: Date | string;
+  endDate?: Date | string;
+}) {
+  const subject = `MediFlow Medication Reminder: ${medicationName}`;
+  const startFmt = startDate ? formatDateTime(startDate).dateStr : undefined;
+  const endFmt = endDate ? formatDateTime(endDate).dateStr : undefined;
+  const durationStr = startFmt && endFmt ? `${startFmt} – ${endFmt}` : undefined;
+
+  const text = `
+Hello ${patientName},
+
+This is your scheduled medication reminder from MediFlow.
+
+Medication: ${medicationName}
+${dosage ? `Dosage: ${dosage}\n` : ''}Frequency: ${frequency}
+Scheduled Time: ${scheduledTime}
+${instructions ? `Doctor's Instructions: ${instructions}\n` : ''}${durationStr ? `Prescribed Course: ${durationStr}\n` : ''}
+Important Notice:
+This is an automated reminder based strictly on your doctor's prescription. Please follow the instructions provided by your physician. Do not alter your dosage or treatment without consulting your doctor.
+  `.trim();
+
+  const bodyHtml = `
+    <h2 style="margin: 0 0 12px; font-size: 18px; color: #0F172A;">Medication Reminder</h2>
+    <p style="margin: 0 0 16px; font-size: 14px; color: #475569;">Hello ${patientName}, it is time to take your prescribed medication.</p>
+    
+    <div class="card" style="border-left: 4px solid #3B5BD5;">
+      <div class="card-row"><span class="label">Medication</span><span class="val" style="color: #1E40AF; font-size: 15px;">${medicationName}</span></div>
+      ${dosage ? `<div class="card-row"><span class="label">Dosage</span><span class="val">${dosage}</span></div>` : ''}
+      <div class="card-row"><span class="label">Frequency</span><span class="val">${frequency}</span></div>
+      <div class="card-row"><span class="label">Reminder Time</span><span class="val" style="color: #2563EB;">${scheduledTime}</span></div>
+      ${instructions ? `<div class="card-row"><span class="label">Instructions</span><span class="val" style="font-weight: 500; font-style: italic;">"${instructions}"</span></div>` : ''}
+      ${durationStr ? `<div class="card-row"><span class="label">Course Duration</span><span class="val">${durationStr}</span></div>` : ''}
+      <div class="card-row"><span class="label">Status</span><span class="val" style="color: #16A34A;">Active Course</span></div>
+    </div>
+
+    <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 12px; margin-top: 16px;">
+      <p style="font-size: 12px; color: #64748B; margin: 0; line-height: 1.4;">
+        <strong>Clinical Disclaimer:</strong> This automated reminder is generated from your physician's clinical prescription records. Never modify, skip, or exceed your dosage without consulting your healthcare provider.
+      </p>
+    </div>
+  `;
+
+  return { subject, text, html: baseHtml(subject, bodyHtml) };
+}
+

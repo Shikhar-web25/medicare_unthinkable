@@ -75,11 +75,19 @@ export const visitNotes = pgTable('visit_notes', {
 
 export const medicationReminders = pgTable('medication_reminders', {
   id: serial('id').primaryKey(),
-  visitNoteId: integer('visit_note_id').references(() => visitNotes.id).notNull(),
+  appointmentId: integer('appointment_id').references(() => appointments.id).notNull(),
   patientId: integer('patient_id').references(() => users.id).notNull(),
   medicationName: text('medication_name').notNull(),
-  scheduleTime: timestamp('schedule_time').notNull(),
-  status: varchar('status', { length: 20 }).default('pending').notNull(), // 'pending', 'sent', 'failed'
+  dosage: text('dosage'),
+  instructions: text('instructions'),
+  frequency: varchar('frequency', { length: 100 }).notNull(),
+  startDate: timestamp('start_date').notNull(),
+  endDate: timestamp('end_date').notNull(),
+  reminderTime: varchar('reminder_time', { length: 255 }).notNull(),
+  status: varchar('status', { length: 20 }).default('ACTIVE').notNull(), // 'ACTIVE', 'COMPLETED', 'CANCELLED'
+  lastSentAt: timestamp('last_sent_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
 export const notificationLogs = pgTable('notification_logs', {
@@ -88,7 +96,7 @@ export const notificationLogs = pgTable('notification_logs', {
   recipientUserId: integer('recipient_user_id').references(() => users.id),
   userId: integer('user_id').references(() => users.id),
   recipientEmail: text('recipient_email').notNull(),
-  type: varchar('type', { length: 50 }).notNull(), // 'BOOKING_CONFIRMATION', 'APPOINTMENT_REMINDER', 'CANCELLATION', 'RESCHEDULE', 'LEAVE_CONFLICT'
+  type: varchar('type', { length: 50 }).notNull(), // 'BOOKING_CONFIRMATION', 'APPOINTMENT_REMINDER', 'CANCELLATION', 'RESCHEDULE', 'LEAVE_CONFLICT', 'MEDICATION_REMINDER'
   channel: varchar('channel', { length: 20 }).default('email').notNull(),
   status: varchar('status', { length: 20 }).default('PENDING').notNull(), // 'PENDING', 'SENDING', 'SENT', 'FAILED'
   retryCount: integer('retry_count').default(0).notNull(),
@@ -97,6 +105,7 @@ export const notificationLogs = pgTable('notification_logs', {
   scheduledFor: timestamp('scheduled_for').defaultNow().notNull(),
   sentAt: timestamp('sent_at'),
   payload: text('payload'),
+  idempotencyKey: text('idempotency_key').unique(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

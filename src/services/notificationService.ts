@@ -13,14 +13,17 @@ import {
   patientLeaveConflictTemplate,
   patientReminderTemplate,
   doctorReminderTemplate,
+  patientMedicationReminderTemplate,
 } from '../lib/emailTemplates.js';
+import { parsePrescription } from '../lib/medicationParser.js';
 
 export type NotificationType =
   | 'BOOKING_CONFIRMATION'
   | 'APPOINTMENT_REMINDER'
   | 'CANCELLATION'
   | 'RESCHEDULE'
-  | 'LEAVE_CONFLICT';
+  | 'LEAVE_CONFLICT'
+  | 'MEDICATION_REMINDER';
 
 export type NotificationStatus = 'PENDING' | 'SENDING' | 'SENT' | 'FAILED';
 
@@ -33,6 +36,7 @@ export interface CreateNotificationParams {
   text: string;
   html?: string;
   scheduledFor?: Date;
+  idempotencyKey?: string;
 }
 
 // ─── 1. CORE NOTIFICATION DISPATCHER ───────────────────────────────────────────
@@ -47,10 +51,24 @@ export async function createAndSendNotification(params: CreateNotificationParams
     text,
     html,
     scheduledFor = new Date(),
+    idempotencyKey,
   } = params;
 
   try {
     const payload = JSON.stringify({ subject, text, html });
+
+    // Check idempotencyKey if provided
+    if (idempotencyKey) {
+      const existing = await db
+        .select({ id: schema.notificationLogs.id })
+        .from(schema.notificationLogs)
+        .where(eq(schema.notificationLogs.idempotencyKey, idempotencyKey))
+        .limit(1);
+
+      if (existing.length > 0) {
+        return; // Duplicate prevented
+      }
+    }
 
     // 1. Insert notification record as PENDING
     const [log] = await db
@@ -66,6 +84,7 @@ export async function createAndSendNotification(params: CreateNotificationParams
         retryCount: 0,
         scheduledFor,
         payload,
+        idempotencyKey: idempotencyKey || null,
       })
       .returning();
 
@@ -79,6 +98,10 @@ export async function createAndSendNotification(params: CreateNotificationParams
       console.error(`[NotificationService] Background send error for log ${log.id}:`, err?.message || err);
     });
   } catch (err: any) {
+    if (err?.code === '23505' || err?.message?.includes('duplicate key')) {
+      // Duplicate idempotency caught at database level
+      return;
+    }
     // Failure here must NEVER throw to the caller / HTTP handler
     console.error('[NotificationService] Failed to create notification log:', err?.message || err);
   }
@@ -210,6 +233,9 @@ export async function notifyBookingCreated(appointmentId: number): Promise<void>
 
 export async function notifyAppointmentCancelled(appointmentId: number): Promise<void> {
   try {
+    // Also cancel any active medication reminders associated with this appointment
+    await cancelMedicationRemindersForAppointment(appointmentId);
+
     const result = await db.execute(sql`
       SELECT 
         a.id AS "appointmentId",
@@ -339,6 +365,8 @@ export async function notifyLeaveConflictAppointments(
 ): Promise<void> {
   for (const apt of affectedAppointments) {
     try {
+      await cancelMedicationRemindersForAppointment(apt.id);
+
       const tmpl = patientLeaveConflictTemplate({
         patientName: apt.patientName,
         doctorName: apt.doctorName,
@@ -361,7 +389,216 @@ export async function notifyLeaveConflictAppointments(
   }
 }
 
-// ─── 3. 24-HOUR APPOINTMENT REMINDERS (BACKGROUND) ───────────────────────────
+// ─── 3. MEDICATION REMINDER CREATION & CANCELLATION ────────────────────────────
+
+export async function createMedicationRemindersForAppointment(
+  appointmentId: number,
+  patientId: number,
+  rawPrescription?: string | null
+): Promise<number> {
+  if (!rawPrescription || !rawPrescription.trim()) {
+    return 0;
+  }
+
+  try {
+    // Idempotency: verify no reminders already exist for this appointment
+    const existing = await db
+      .select({ id: schema.medicationReminders.id })
+      .from(schema.medicationReminders)
+      .where(eq(schema.medicationReminders.appointmentId, appointmentId));
+
+    if (existing.length > 0) {
+      return existing.length;
+    }
+
+    const parsedList = parsePrescription(rawPrescription);
+    if (parsedList.length === 0) {
+      return 0;
+    }
+
+    let createdCount = 0;
+    const now = new Date();
+
+    for (const item of parsedList) {
+      const startDate = new Date(now);
+      const endDate = new Date(now.getTime() + item.durationDays * 24 * 60 * 60 * 1000);
+      const reminderTimeStr = item.reminderTimes.length > 0 ? item.reminderTimes.join(',') : '09:00';
+
+      await db.insert(schema.medicationReminders).values({
+        appointmentId,
+        patientId,
+        medicationName: item.medicationName,
+        dosage: item.dosage || null,
+        instructions: item.instructions || null,
+        frequency: item.frequency,
+        startDate,
+        endDate,
+        reminderTime: reminderTimeStr,
+        status: 'ACTIVE',
+      });
+      createdCount++;
+    }
+
+    console.log(`[MedicationReminders] Created ${createdCount} reminder(s) for appointment ${appointmentId}`);
+    return createdCount;
+  } catch (err: any) {
+    console.error(`[MedicationReminders] Error creating reminders for apt ${appointmentId}:`, err?.message || err);
+    return 0;
+  }
+}
+
+export async function cancelMedicationRemindersForAppointment(appointmentId: number): Promise<void> {
+  try {
+    await db
+      .update(schema.medicationReminders)
+      .set({ status: 'CANCELLED', updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.medicationReminders.appointmentId, appointmentId),
+          eq(schema.medicationReminders.status, 'ACTIVE')
+        )
+      );
+  } catch (err: any) {
+    console.error(`[MedicationReminders] Error cancelling reminders for apt ${appointmentId}:`, err?.message || err);
+  }
+}
+
+// ─── 4. BACKGROUND MEDICATION REMINDER ENGINE ─────────────────────────────────
+
+export async function processMedicationReminders(): Promise<{ sent: number; skipped: number }> {
+  let sent = 0;
+  let skipped = 0;
+
+  try {
+    const now = new Date();
+    const todayDateStr = now.toISOString().split('T')[0];
+    const currentHours = now.getHours();
+    const currentMinutes = now.getMinutes();
+    const currentTotalMin = currentHours * 60 + currentMinutes;
+
+    // Fetch all active medication reminders
+    const result = await db.execute(sql`
+      SELECT 
+        mr.id,
+        mr.appointment_id AS "appointmentId",
+        mr.patient_id AS "patientId",
+        mr.medication_name AS "medicationName",
+        mr.dosage,
+        mr.instructions,
+        mr.frequency,
+        mr.start_date AS "startDate",
+        mr.end_date AS "endDate",
+        mr.reminder_time AS "reminderTime",
+        mr.status,
+        mr.last_sent_at AS "lastSentAt",
+        p.name AS "patientName",
+        p.email AS "patientEmail",
+        a.status AS "appointmentStatus"
+      FROM medication_reminders mr
+      JOIN users p ON mr.patient_id = p.id
+      JOIN appointments a ON mr.appointment_id = a.id
+      WHERE mr.status = 'ACTIVE'
+    `);
+
+    const activeReminders = result.rows as any[];
+
+    for (const rem of activeReminders) {
+      // 1. Appointment cancelled check
+      if (rem.appointmentStatus === 'cancelled') {
+        await db
+          .update(schema.medicationReminders)
+          .set({ status: 'CANCELLED', updatedAt: now })
+          .where(eq(schema.medicationReminders.id, rem.id));
+        continue;
+      }
+
+      const startDate = new Date(rem.startDate);
+      const endDate = new Date(rem.endDate);
+
+      // 2. Expiration check (now > endDate)
+      if (now.getTime() > endDate.getTime()) {
+        await db
+          .update(schema.medicationReminders)
+          .set({ status: 'COMPLETED', updatedAt: now })
+          .where(eq(schema.medicationReminders.id, rem.id));
+        continue;
+      }
+
+      // 3. Not started yet
+      if (now.getTime() < startDate.getTime() - 5 * 60 * 1000) {
+        continue;
+      }
+
+      // 4. PRN / As-needed check
+      if (rem.frequency.toLowerCase().includes('as needed') || rem.frequency.toLowerCase().includes('prn')) {
+        continue;
+      }
+
+      // 5. Parse reminder times (e.g. "09:00" or "09:00,21:00")
+      const times = rem.reminderTime
+        .split(',')
+        .map((t: string) => t.trim())
+        .filter((t: string) => /^\d{1,2}:\d{2}$/.test(t));
+
+      for (const timeStr of times) {
+        const [th, tm] = timeStr.split(':').map(Number);
+        const targetTotalMin = th * 60 + tm;
+        
+        // Window check: matches within 15 minutes of scheduled time
+        const diffMinutes = Math.abs(currentTotalMin - targetTotalMin);
+        if (diffMinutes <= 15 || (targetTotalMin >= currentTotalMin - 15 && targetTotalMin <= currentTotalMin + 15)) {
+          const occurrenceKey = `med_reminder_${rem.id}_${todayDateStr}_${timeStr}`;
+
+          // Check duplicate occurrence
+          const existingLog = await db
+            .select({ id: schema.notificationLogs.id })
+            .from(schema.notificationLogs)
+            .where(eq(schema.notificationLogs.idempotencyKey, occurrenceKey))
+            .limit(1);
+
+          if (existingLog.length === 0) {
+            const tmpl = patientMedicationReminderTemplate({
+              patientName: rem.patientName,
+              medicationName: rem.medicationName,
+              dosage: rem.dosage || undefined,
+              instructions: rem.instructions || undefined,
+              frequency: rem.frequency,
+              scheduledTime: timeStr,
+              startDate: rem.startDate,
+              endDate: rem.endDate,
+            });
+
+            await createAndSendNotification({
+              appointmentId: rem.appointmentId,
+              recipientUserId: rem.patientId,
+              recipientEmail: rem.patientEmail,
+              type: 'MEDICATION_REMINDER',
+              subject: tmpl.subject,
+              text: tmpl.text,
+              html: tmpl.html,
+              idempotencyKey: occurrenceKey,
+            });
+
+            await db
+              .update(schema.medicationReminders)
+              .set({ lastSentAt: now, updatedAt: now })
+              .where(eq(schema.medicationReminders.id, rem.id));
+
+            sent++;
+          } else {
+            skipped++;
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error('[NotificationService] processMedicationReminders error:', err?.message || err);
+  }
+
+  return { sent, skipped };
+}
+
+// ─── 5. 24-HOUR APPOINTMENT REMINDERS (BACKGROUND) ───────────────────────────
 
 export async function processAppointmentReminders(): Promise<{ sent: number; skipped: number }> {
   let sent = 0;
@@ -473,7 +710,7 @@ export async function processAppointmentReminders(): Promise<{ sent: number; ski
   return { sent, skipped };
 }
 
-// ─── 4. RETRY ENGINE (BACKGROUND) ─────────────────────────────────────────────
+// ─── 6. RETRY ENGINE (BACKGROUND) ─────────────────────────────────────────────
 
 export async function processPendingAndFailedNotifications(): Promise<{ retried: number; failed: number }> {
   let retried = 0;
@@ -576,7 +813,7 @@ export async function processPendingAndFailedNotifications(): Promise<{ retried:
   return { retried, failed };
 }
 
-// ─── 5. BACKGROUND CRON SCHEDULER ─────────────────────────────────────────────
+// ─── 7. BACKGROUND CRON SCHEDULER ─────────────────────────────────────────────
 
 export function startNotificationCronJobs(): void {
   try {
@@ -584,12 +821,21 @@ export function startNotificationCronJobs(): void {
     cron.schedule('*/5 * * * *', async () => {
       console.log('[NotificationService] Running scheduled reminder & retry cycle...');
       try {
-        const reminders = await processAppointmentReminders();
-        if (reminders.sent > 0) {
-          console.log(`[NotificationService] Sent ${reminders.sent} appointment reminder(s)`);
+        const aptReminders = await processAppointmentReminders();
+        if (aptReminders.sent > 0) {
+          console.log(`[NotificationService] Sent ${aptReminders.sent} appointment reminder(s)`);
         }
       } catch (e: any) {
-        console.error('[NotificationService] Cron reminder error:', e?.message || e);
+        console.error('[NotificationService] Cron appointment reminder error:', e?.message || e);
+      }
+
+      try {
+        const medReminders = await processMedicationReminders();
+        if (medReminders.sent > 0) {
+          console.log(`[NotificationService] Sent ${medReminders.sent} medication reminder(s)`);
+        }
+      } catch (e: any) {
+        console.error('[NotificationService] Cron medication reminder error:', e?.message || e);
       }
 
       try {

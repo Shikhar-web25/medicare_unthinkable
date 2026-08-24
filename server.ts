@@ -14,6 +14,7 @@ import {
   notifyAppointmentCancelled,
   notifyAppointmentRescheduled,
   notifyLeaveConflictAppointments,
+  createMedicationRemindersForAppointment,
 } from './src/services/notificationService.js';
 import {
   generateAuthUrl,
@@ -850,6 +851,8 @@ async function startServer() {
         return res.status(403).json({ error: 'Only doctors can complete appointments' });
       }
 
+      let patientId: number | null = null;
+
       await db.transaction(async (tx) => {
         const [doc] = await tx.select().from(schema.doctorProfiles).where(eq(schema.doctorProfiles.userId, user.id));
         const [appointment] = await tx.select().from(schema.appointments).where(eq(schema.appointments.id, appointmentId));
@@ -857,6 +860,8 @@ async function startServer() {
         if (!appointment || appointment.doctorId !== doc.id) {
           throw new Error('FORBIDDEN: Access denied');
         }
+
+        patientId = appointment.patientId;
 
         await tx.update(schema.appointments)
           .set({ status: 'completed' })
@@ -869,6 +874,13 @@ async function startServer() {
           followUpInstructions
         });
       });
+
+      // Create medication reminder records asynchronously if prescription exists
+      if (patientId && prescriptionRaw) {
+        createMedicationRemindersForAppointment(appointmentId, patientId, prescriptionRaw).catch(err => {
+          console.error('[MedicationReminders] Error creating reminders after completion:', err);
+        });
+      }
 
       // AI post-visit summary processing
       generatePostVisitSummary(clinicalNotes, prescriptionRaw).then(async (summary) => {
@@ -916,8 +928,104 @@ async function startServer() {
       
       const [symptomForm] = await db.select().from(schema.symptomForms).where(eq(schema.symptomForms.appointmentId, appointmentId));
       const [visitNote] = await db.select().from(schema.visitNotes).where(eq(schema.visitNotes.appointmentId, appointmentId));
+      const medicationReminders = await db
+        .select()
+        .from(schema.medicationReminders)
+        .where(eq(schema.medicationReminders.appointmentId, appointmentId));
 
-      res.json({ ...appointment, symptomForm, visitNote });
+      res.json({ ...appointment, symptomForm, visitNote, medicationReminders });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 6. Medication Reminders Endpoint
+  app.get("/api/medications/reminders", authenticateToken, async (req, res) => {
+    try {
+      const user = (req as any).user;
+
+      if (user.role === 'patient') {
+        const result = await db.execute(sql`
+          SELECT 
+            mr.id,
+            mr.appointment_id AS "appointmentId",
+            mr.patient_id AS "patientId",
+            mr.medication_name AS "medicationName",
+            mr.dosage,
+            mr.instructions,
+            mr.frequency,
+            mr.start_date AS "startDate",
+            mr.end_date AS "endDate",
+            mr.reminder_time AS "reminderTime",
+            mr.status,
+            mr.last_sent_at AS "lastSentAt",
+            mr.created_at AS "createdAt",
+            d.name AS "doctorName",
+            dp.specialisation AS "specialisation"
+          FROM medication_reminders mr
+          JOIN appointments a ON mr.appointment_id = a.id
+          JOIN doctor_profiles dp ON a.doctor_id = dp.id
+          JOIN users d ON dp.user_id = d.id
+          WHERE mr.patient_id = ${user.id}
+          ORDER BY mr.created_at DESC
+        `);
+        return res.json(result.rows);
+      } else if (user.role === 'doctor') {
+        const [doc] = await db.select().from(schema.doctorProfiles).where(eq(schema.doctorProfiles.userId, user.id));
+        if (!doc) return res.json([]);
+
+        const result = await db.execute(sql`
+          SELECT 
+            mr.id,
+            mr.appointment_id AS "appointmentId",
+            mr.patient_id AS "patientId",
+            mr.medication_name AS "medicationName",
+            mr.dosage,
+            mr.instructions,
+            mr.frequency,
+            mr.start_date AS "startDate",
+            mr.end_date AS "endDate",
+            mr.reminder_time AS "reminderTime",
+            mr.status,
+            mr.last_sent_at AS "lastSentAt",
+            mr.created_at AS "createdAt",
+            p.name AS "patientName"
+          FROM medication_reminders mr
+          JOIN appointments a ON mr.appointment_id = a.id
+          JOIN users p ON mr.patient_id = p.id
+          WHERE a.doctor_id = ${doc.id}
+          ORDER BY mr.created_at DESC
+        `);
+        return res.json(result.rows);
+      } else if (user.role === 'admin') {
+        const result = await db.execute(sql`
+          SELECT 
+            mr.id,
+            mr.appointment_id AS "appointmentId",
+            mr.patient_id AS "patientId",
+            mr.medication_name AS "medicationName",
+            mr.dosage,
+            mr.instructions,
+            mr.frequency,
+            mr.start_date AS "startDate",
+            mr.end_date AS "endDate",
+            mr.reminder_time AS "reminderTime",
+            mr.status,
+            mr.last_sent_at AS "lastSentAt",
+            mr.created_at AS "createdAt",
+            p.name AS "patientName",
+            d.name AS "doctorName"
+          FROM medication_reminders mr
+          JOIN appointments a ON mr.appointment_id = a.id
+          JOIN doctor_profiles dp ON a.doctor_id = dp.id
+          JOIN users d ON dp.user_id = d.id
+          JOIN users p ON mr.patient_id = p.id
+          ORDER BY mr.created_at DESC
+        `);
+        return res.json(result.rows);
+      }
+
+      return res.status(403).json({ error: 'Access denied' });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
