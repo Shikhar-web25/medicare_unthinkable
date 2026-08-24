@@ -15,6 +15,15 @@ import {
   notifyAppointmentRescheduled,
   notifyLeaveConflictAppointments,
 } from './src/services/notificationService.js';
+import {
+  generateAuthUrl,
+  handleOAuthCallback,
+  isUserCalendarConnected,
+  disconnectUserCalendar,
+  syncAppointmentCalendarEvents,
+  updateAppointmentCalendarEvents,
+  deleteAppointmentCalendarEvents,
+} from './src/lib/googleCalendar.js';
 
 async function startServer() {
   const app = express();
@@ -105,6 +114,71 @@ async function startServer() {
     } catch (e: any) {
       console.error('Login error:', e);
       res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // --- Google Calendar Routes ---
+
+  // 1. Initiate Google Calendar OAuth connection
+  app.get("/api/calendar/connect", authenticateToken, (req, res) => {
+    try {
+      const userId = (req as any).user.id;
+      const url = generateAuthUrl(userId, JWT_SECRET);
+      if (!url) {
+        return res.status(400).json({ error: 'Google Calendar integration is not configured on the server' });
+      }
+      res.json({ url });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 2. Google OAuth Callback
+  app.get("/api/calendar/callback", async (req, res) => {
+    try {
+      const { code, state, error } = req.query;
+
+      if (error) {
+        console.warn('[Calendar] Google OAuth denied:', error);
+        return res.redirect('/?calendar_error=access_denied');
+      }
+
+      if (!code || !state) {
+        return res.status(400).send('Missing code or state parameter');
+      }
+
+      const result = await handleOAuthCallback(code as string, state as string, JWT_SECRET);
+
+      if (result.success) {
+        res.redirect('/?calendar=connected');
+      } else {
+        res.redirect(`/?calendar_error=${encodeURIComponent(result.error || 'connection_failed')}`);
+      }
+    } catch (e: any) {
+      console.error('[Calendar] Callback error:', e);
+      res.redirect('/?calendar_error=server_error');
+    }
+  });
+
+  // 3. Check Google Calendar connection status
+  app.get("/api/calendar/status", authenticateToken, async (req, res) => {
+    try {
+      const userId = (req as any).user.id;
+      const connected = await isUserCalendarConnected(userId);
+      res.json({ connected });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 4. Disconnect Google Calendar
+  app.post("/api/calendar/disconnect", authenticateToken, async (req, res) => {
+    try {
+      const userId = (req as any).user.id;
+      await disconnectUserCalendar(userId);
+      res.json({ success: true, connected: false });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -248,6 +322,13 @@ async function startServer() {
             reason: reason || undefined,
           }))
         ).catch(err => console.error('[Leave] Conflict notification error:', err));
+
+        // Delete associated calendar events asynchronously
+        conflictAppointments.rows.forEach((row: any) => {
+          deleteAppointmentCalendarEvents(row.id).catch(err => {
+            console.error('[Leave] Calendar event deletion error:', err);
+          });
+        });
       }
 
       res.json({ success: true, affected: conflicts.length });
@@ -584,6 +665,11 @@ async function startServer() {
         notifyBookingCreated(appointment.id).catch(err => {
           console.error('[Booking] Email notification error:', err);
         });
+
+        // Trigger Google Calendar event creation asynchronously
+        syncAppointmentCalendarEvents(appointment.id).catch(err => {
+          console.error('[Booking] Calendar sync error:', err);
+        });
       });
     } catch (e: any) {
       if (e.code === '23505' || e.message.includes('CONFLICT')) {
@@ -621,6 +707,11 @@ async function startServer() {
         // Trigger cancellation email asynchronously after response
         notifyAppointmentCancelled(appointmentId).catch(err => {
           console.error('[Cancellation] Email notification error:', err);
+        });
+
+        // Trigger Google Calendar event deletion asynchronously
+        deleteAppointmentCalendarEvents(appointmentId).catch(err => {
+          console.error('[Cancellation] Calendar deletion error:', err);
         });
       });
     } catch (e: any) {
@@ -695,6 +786,11 @@ async function startServer() {
         // Trigger reschedule email asynchronously after response
         notifyAppointmentRescheduled(appointmentId, oldSlotStart).catch(err => {
           console.error('[Reschedule] Email notification error:', err);
+        });
+
+        // Trigger Google Calendar event update asynchronously
+        updateAppointmentCalendarEvents(appointmentId).catch(err => {
+          console.error('[Reschedule] Calendar update error:', err);
         });
       });
     } catch (e: any) {

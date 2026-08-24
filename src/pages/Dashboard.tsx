@@ -460,11 +460,21 @@ function DoctorRow({
 
 // ─── Patient Right Panel ───────────────────────────────────────────────────────
 function PatientRightPanel({
-  selectedDate, onDateChange, appointments,
+  selectedDate,
+  onDateChange,
+  appointments,
+  calendarConnected,
+  loadingCalendar,
+  onConnectCalendar,
+  onDisconnectCalendar,
 }: {
   selectedDate: string;
   onDateChange: (d: string) => void;
   appointments: any[];
+  calendarConnected: boolean;
+  loadingCalendar: boolean;
+  onConnectCalendar: () => void;
+  onDisconnectCalendar: () => void;
 }) {
   const today = new Date().toISOString().split('T')[0];
   const next = appointments
@@ -476,6 +486,38 @@ function PatientRightPanel({
       <div>
         <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Select Date</p>
         <MiniCalendar value={selectedDate} onChange={onDateChange} minDate={today} />
+      </div>
+
+      <div>
+        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Google Calendar</p>
+        <div className="bg-slate-50 border border-slate-100 rounded-lg p-3">
+          {calendarConnected ? (
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                Google Calendar Connected
+              </div>
+              <button
+                onClick={onDisconnectCalendar}
+                className="w-full text-center py-1 px-2 text-[11px] font-semibold text-slate-500 hover:text-rose-600 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-100 rounded transition-colors"
+              >
+                Disconnect Google Calendar
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-500">Sync appointments directly with your personal calendar.</p>
+              <button
+                onClick={onConnectCalendar}
+                disabled={loadingCalendar}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                Connect Google Calendar
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {next && (
@@ -500,7 +542,21 @@ function PatientRightPanel({
 }
 
 // ─── Doctor Right Panel ────────────────────────────────────────────────────────
-function DoctorRightPanel({ user, appointments }: { user: any; appointments: any[] }) {
+function DoctorRightPanel({
+  user,
+  appointments,
+  calendarConnected,
+  loadingCalendar,
+  onConnectCalendar,
+  onDisconnectCalendar,
+}: {
+  user: any;
+  appointments: any[];
+  calendarConnected: boolean;
+  loadingCalendar: boolean;
+  onConnectCalendar: () => void;
+  onDisconnectCalendar: () => void;
+}) {
   const scheduled = appointments.filter(a => a.status === 'scheduled').length;
   const completed = appointments.filter(a => a.status === 'completed').length;
 
@@ -519,6 +575,38 @@ function DoctorRightPanel({ user, appointments }: { user: any; appointments: any
             <div className="text-sm font-semibold text-slate-800 truncate">{user?.name}</div>
             <div className="text-xs text-slate-400 truncate">{user?.email}</div>
           </div>
+        </div>
+      </div>
+
+      <div>
+        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Google Calendar</p>
+        <div className="bg-slate-50 border border-slate-100 rounded-lg p-3">
+          {calendarConnected ? (
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                Google Calendar Connected
+              </div>
+              <button
+                onClick={onDisconnectCalendar}
+                className="w-full text-center py-1 px-2 text-[11px] font-semibold text-slate-500 hover:text-rose-600 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-100 rounded transition-colors"
+              >
+                Disconnect Google Calendar
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-500">Sync patient consultations to your Google schedule.</p>
+              <button
+                onClick={onConnectCalendar}
+                disabled={loadingCalendar}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                Connect Google Calendar
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -566,7 +654,58 @@ export default function Dashboard() {
   });
   const [activeTab, setActiveTab] = useState('dashboard');
 
+  const [calendarConnected, setCalendarConnected] = useState(false);
+  const [loadingCalendar, setLoadingCalendar] = useState(false);
+
   // ── Fetch helpers (identical to original) ────────────────────────────────────
+  const fetchCalendarStatus = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch('/api/calendar/status', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json();
+        setCalendarConnected(Boolean(data.connected));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleConnectCalendar = async () => {
+    try {
+      setLoadingCalendar(true);
+      const res = await fetch('/api/calendar/connect', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        alert(data.error || 'Google Calendar is not configured on the server');
+      }
+    } catch (e: any) {
+      alert(e.message || 'Error connecting to Google Calendar');
+    } finally {
+      setLoadingCalendar(false);
+    }
+  };
+
+  const handleDisconnectCalendar = async () => {
+    if (!confirm('Are you sure you want to disconnect your Google Calendar?')) return;
+    try {
+      setLoadingCalendar(true);
+      const res = await fetch('/api/calendar/disconnect', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setCalendarConnected(false);
+      }
+    } catch (e: any) {
+      console.error(e);
+    } finally {
+      setLoadingCalendar(false);
+    }
+  };
+
   const fetchAppointments = async () => {
     try {
       const res = await fetch('/api/appointments', { headers: { Authorization: `Bearer ${token}` } });
@@ -684,6 +823,16 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
+    // Check calendar callback query params
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('calendar') === 'connected') {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      fetchCalendarStatus();
+    } else if (params.get('calendar_error')) {
+      alert(`Google Calendar connection error: ${params.get('calendar_error')}`);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     if (user?.role === 'patient') {
       fetch('/api/doctors', { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json())
@@ -693,8 +842,10 @@ export default function Dashboard() {
         })
         .catch(console.error);
       fetchAppointments();
+      fetchCalendarStatus();
     } else if (user?.role === 'doctor') {
       fetchAppointments();
+      fetchCalendarStatus();
     }
   }, [user, token]);
 
@@ -736,9 +887,20 @@ export default function Dashboard() {
               selectedDate={selectedDate}
               onDateChange={date => { setSelectedDate(date); fetchAvailability(date, doctors); }}
               appointments={appointments}
+              calendarConnected={calendarConnected}
+              loadingCalendar={loadingCalendar}
+              onConnectCalendar={handleConnectCalendar}
+              onDisconnectCalendar={handleDisconnectCalendar}
             />
           ) : user?.role === 'doctor' ? (
-            <DoctorRightPanel user={user} appointments={appointments} />
+            <DoctorRightPanel
+              user={user}
+              appointments={appointments}
+              calendarConnected={calendarConnected}
+              loadingCalendar={loadingCalendar}
+              onConnectCalendar={handleConnectCalendar}
+              onDisconnectCalendar={handleDisconnectCalendar}
+            />
           ) : undefined
         }
       >

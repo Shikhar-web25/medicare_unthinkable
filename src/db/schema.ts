@@ -100,9 +100,27 @@ export const notificationLogs = pgTable('notification_logs', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const userGoogleTokens = pgTable('user_google_tokens', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id').references(() => users.id).notNull().unique(),
+  accessToken: text('access_token').notNull(),
+  refreshToken: text('refresh_token'),
+  expiryDate: timestamp('expiry_date'),
+  scope: text('scope'),
+  tokenType: varchar('token_type', { length: 50 }).default('Bearer'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 export const calendarEvents = pgTable('calendar_events', {
   id: serial('id').primaryKey(),
   appointmentId: integer('appointment_id').references(() => appointments.id).notNull().unique(),
+  userId: integer('user_id').references(() => users.id),
+  googleEventId: text('google_event_id'),
+  calendarId: text('calendar_id').default('primary'),
   patientGoogleEventId: text('patient_google_event_id'),
   doctorGoogleEventId: text('doctor_google_event_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
