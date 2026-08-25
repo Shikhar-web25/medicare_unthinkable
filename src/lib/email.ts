@@ -1,6 +1,8 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
-import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+import dns from 'node:dns';
+
+dns.setDefaultResultOrder('ipv4first');
 
 export interface SendEmailOptions {
   to: string;
@@ -21,7 +23,10 @@ let isConfigured = false;
 
 function initTransporter(): Transporter | null {
   const host = process.env.SMTP_HOST;
-  const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : undefined;
+  const port = process.env.SMTP_PORT
+    ? parseInt(process.env.SMTP_PORT, 10)
+    : undefined;
+
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASSWORD;
 
@@ -30,11 +35,10 @@ function initTransporter(): Transporter | null {
   }
 
   try {
-    const smtpOptions: SMTPTransport.Options & { family?: number } = {
+    const t = nodemailer.createTransport({
       host,
       port: port || 587,
       secure: port === 465,
-      family: 4,
       auth: {
         user,
         pass,
@@ -42,29 +46,43 @@ function initTransporter(): Transporter | null {
       connectionTimeout: 10000,
       greetingTimeout: 10000,
       socketTimeout: 15000,
-    };
-    const t = nodemailer.createTransport(smtpOptions);
+    });
+
     isConfigured = true;
     return t;
   } catch (err: any) {
-    console.error('[Email] Failed to initialize SMTP transporter:', err?.message || err);
+    console.error(
+      '[Email] Failed to initialize SMTP transporter:',
+      err?.message || err
+    );
+
     return null;
   }
 }
 
 export function isSmtpConfigured(): boolean {
-  if (transporter) return isConfigured;
+  if (transporter) {
+    return isConfigured;
+  }
+
   transporter = initTransporter();
+
   return Boolean(transporter);
 }
 
-export async function sendEmail({ to, subject, text, html }: SendEmailOptions): Promise<SendEmailResult> {
+export async function sendEmail({
+  to,
+  subject,
+  text,
+  html,
+}: SendEmailOptions): Promise<SendEmailResult> {
   if (!transporter) {
     transporter = initTransporter();
   }
 
   if (!transporter) {
     console.log('[Email] SMTP not configured; notification queued');
+
     return {
       success: false,
       error: 'SMTP not configured',
@@ -72,7 +90,10 @@ export async function sendEmail({ to, subject, text, html }: SendEmailOptions): 
     };
   }
 
-  const from = process.env.EMAIL_FROM || process.env.SMTP_USER || 'no-reply@mediflow.com';
+  const from =
+    process.env.EMAIL_FROM ||
+    process.env.SMTP_USER ||
+    'no-reply@mediflow.com';
 
   try {
     const info = await transporter.sendMail({
@@ -83,20 +104,25 @@ export async function sendEmail({ to, subject, text, html }: SendEmailOptions): 
       html: html || text,
     });
 
-    console.log(`[Email] Successfully sent email to ${to} (Message ID: ${info.messageId})`);
+    console.log(
+      `[Email] Successfully sent email to ${to} (Message ID: ${info.messageId})`
+    );
+
     return {
       success: true,
       messageId: info.messageId,
     };
   } catch (err: any) {
     const errorMessage = err?.message || String(err);
-    console.error(`[Email] Error sending email to ${to}:`, errorMessage);
 
-    // Identify transient vs permanent failures
+    console.error(
+      `[Email] Error sending email to ${to}:`,
+      errorMessage
+    );
+
     const code = err?.code || '';
     const responseCode = err?.responseCode || 0;
-    
-    // Auth failures, syntax errors, invalid addresses are permanent
+
     const isPermanent =
       code === 'EAUTH' ||
       responseCode === 535 ||
