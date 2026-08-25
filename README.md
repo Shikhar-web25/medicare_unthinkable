@@ -1,5 +1,7 @@
 # MediFlow
 
+### 🚀 [Live Demo →](https://medicare-unthinkable.onrender.com)
+
 > A full-stack healthcare appointment and consultation platform connecting patients, doctors, and administrators through secure scheduling, AI-assisted summaries, notifications, Google Calendar synchronization, and medication reminders.
 
 ## Overview
